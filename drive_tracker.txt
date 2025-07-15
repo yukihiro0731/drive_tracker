@@ -1,0 +1,345 @@
+drive_tracker/
+  pubspec.yaml
+  lib/
+    main.dart
+    screens/
+      home_screen.dart
+      history_screen.dart
+    db/
+      db_helper.dart
+    models/
+      drive_record.dart
+name: drive_tracker
+description: A simple drive distance tracker app with Flutter.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  google_maps_flutter: ^2.5.0
+  geolocator: ^10.1.0
+  sqflite: ^2.3.0
+  path_provider: ^2.1.1
+  intl: ^0.18.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+import 'package:flutter/material.dart';
+import 'screens/home_screen.dart';
+import 'screens/history_screen.dart';
+
+void main() {
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Drive Tracker',
+      theme: ThemeData(
+        primarySwatch: Colors.teal,
+        textTheme: TextTheme(bodyMedium: TextStyle(fontSize: 16)),
+      ),
+      home: HomeScreen(),
+      routes: {
+        '/history': (_) => HistoryScreen(),
+      },
+    );
+  }
+}
+class DriveRecord {
+  final int? id;
+  final String date;
+  final double distance;
+  final int duration;
+  final double avgSpeed;
+
+  DriveRecord({
+    this.id,
+    required this.date,
+    required this.distance,
+    required this.duration,
+    required this.avgSpeed,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'date': date,
+      'distance': distance,
+      'duration': duration,
+      'avgSpeed': avgSpeed,
+    };
+  }
+
+  factory DriveRecord.fromMap(Map<String, dynamic> map) {
+    return DriveRecord(
+      id: map['id'],
+      date: map['date'],
+      distance: map['distance'],
+      duration: map['duration'],
+      avgSpeed: map['avgSpeed'],
+    );
+  }
+}
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
+import '../models/drive_record.dart';
+
+class DBHelper {
+  static Database? _db;
+
+  static Future<Database> get database async {
+    if (_db != null) return _db!;
+    _db = await _initDB();
+    return _db!;
+  }
+
+  static Future<Database> _initDB() async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, 'drive_records.db');
+
+    return await openDatabase(
+      path,
+      version: 1,
+      onCreate: (db, version) {
+        return db.execute(
+          'CREATE TABLE records (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, distance REAL, duration INTEGER, avgSpeed REAL)',
+        );
+      },
+    );
+  }
+
+  static Future<int> insertRecord(DriveRecord record) async {
+    final db = await database;
+    return await db.insert('records', record.toMap());
+  }
+
+  static Future<List<DriveRecord>> getRecords() async {
+    final db = await database;
+    final result = await db.query('records', orderBy: 'id DESC');
+    return result.map((e) => DriveRecord.fromMap(e)).toList();
+  }
+}
+import 'dart:async';
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:intl/intl.dart';
+import '../db/db_helper.dart';
+import '../models/drive_record.dart';
+
+class HomeScreen extends StatefulWidget {
+  @override
+  _HomeScreenState createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  Completer<GoogleMapController> _controller = Completer();
+  LatLng? _currentPosition;
+  List<LatLng> _routePoints = [];
+  double _distance = 0.0;
+  bool _isTracking = false;
+  DateTime? _startTime;
+  Timer? _timer;
+  Duration _elapsed = Duration.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    _getCurrentLocation();
+  }
+
+  Future<void> _getCurrentLocation() async {
+    Position position = await Geolocator.getCurrentPosition();
+    setState(() {
+      _currentPosition = LatLng(position.latitude, position.longitude);
+    });
+  }
+
+  void _startTracking() {
+    setState(() {
+      _isTracking = true;
+      _distance = 0.0;
+      _routePoints.clear();
+      _startTime = DateTime.now();
+      _elapsed = Duration.zero;
+    });
+    _timer = Timer.periodic(Duration(seconds: 1), (_) {
+      setState(() {
+        _elapsed = DateTime.now().difference(_startTime!);
+      });
+    });
+    Geolocator.getPositionStream().listen((Position pos) {
+      if (_isTracking) {
+        LatLng newPos = LatLng(pos.latitude, pos.longitude);
+        if (_routePoints.isNotEmpty) {
+          _distance += _calculateDistance(_routePoints.last, newPos);
+        }
+        setState(() {
+          _routePoints.add(newPos);
+          _currentPosition = newPos;
+        });
+      }
+    });
+  }
+
+  void _stopTracking() async {
+    setState(() {
+      _isTracking = false;
+      _timer?.cancel();
+    });
+    if (_startTime != null) {
+      final avgSpeed = _distance / (_elapsed.inHours + (_elapsed.inMinutes / 60));
+      final record = DriveRecord(
+        date: DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now()),
+        distance: _distance,
+        duration: _elapsed.inMinutes,
+        avgSpeed: avgSpeed.isNaN ? 0 : avgSpeed,
+      );
+      await DBHelper.insertRecord(record);
+    }
+  }
+
+  double _calculateDistance(LatLng p1, LatLng p2) {
+    const double R = 6371000;
+    double dLat = (p2.latitude - p1.latitude) * (pi / 180);
+    double dLon = (p2.longitude - p1.longitude) * (pi / 180);
+    double a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(p1.latitude * (pi / 180)) * cos(p2.latitude * (pi / 180)) * sin(dLon / 2) * sin(dLon / 2);
+    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return (R * c) / 1000; // km
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("Drive Tracker"),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.history),
+            onPressed: () => Navigator.pushNamed(context, '/history'),
+          ),
+        ],
+      ),
+      body: _currentPosition == null
+          ? Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                Expanded(
+                  child: GoogleMap(
+                    initialCameraPosition: CameraPosition(
+                      target: _currentPosition!,
+                      zoom: 15,
+                    ),
+                    polylines: {
+                      Polyline(
+                        polylineId: PolylineId("route"),
+                        points: _routePoints,
+                        color: Colors.teal,
+                        width: 5,
+                      ),
+                    },
+                    markers: {
+                      if (_currentPosition != null)
+                        Marker(
+                          markerId: MarkerId("current"),
+                          position: _currentPosition!,
+                        ),
+                    },
+                    onMapCreated: (controller) {
+                      _controller.complete(controller);
+                    },
+                  ),
+                ),
+                Container(
+                  padding: EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4)],
+                  ),
+                  child: Column(
+                    children: [
+                      Text("距離: ${_distance.toStringAsFixed(2)} km", style: TextStyle(fontSize: 18)),
+                      Text("時間: ${_elapsed.inMinutes} 分", style: TextStyle(fontSize: 16)),
+                      SizedBox(height: 10),
+                      ElevatedButton(
+                        onPressed: _isTracking ? _stopTracking : _startTracking,
+                        child: Text(_isTracking ? "ストップ" : "スタート"),
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: Size(double.infinity, 50),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+}
+import 'package:flutter/material.dart';
+import '../db/db_helper.dart';
+import '../models/drive_record.dart';
+
+class HistoryScreen extends StatefulWidget {
+  @override
+  _HistoryScreenState createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  List<DriveRecord> _records = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRecords();
+  }
+
+  void _loadRecords() async {
+    final data = await DBHelper.getRecords();
+    setState(() {
+      _records = data;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('履歴')),
+      body: _records.isEmpty
+          ? Center(child: Text('まだ記録がありません'))
+          : ListView.builder(
+              itemCount: _records.length,
+              itemBuilder: (context, index) {
+                final r = _records[index];
+                return Card(
+                  margin: EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  elevation: 3,
+                  child: ListTile(
+                    title: Text(r.date),
+                    subtitle: Text(
+                        '距離: ${r.distance.toStringAsFixed(2)} km\n時間: ${r.duration} 分\n平均速度: ${r.avgSpeed.toStringAsFixed(2)} km/h'),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
